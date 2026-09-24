@@ -1,0 +1,513 @@
+import customtkinter as ctk
+from tkinter import filedialog
+import threading
+
+from validations.actuals_validator import run_validation as actuals_validation
+
+# =====================================================
+# APP SETTINGS
+# =====================================================
+
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+# =====================================================
+# COLORS
+# =====================================================
+
+PRIMARY = "#2563EB"
+SUCCESS = "#16A34A"
+BACKGROUND = "#F8FAFC"
+
+# =====================================================
+# ROOT
+# =====================================================
+
+root = ctk.CTk()
+root.title("Data Validation Hub")
+root.geometry("1500x900")
+root.minsize(1300, 800)
+
+# =====================================================
+# FILE STORAGE
+# =====================================================
+
+file_paths = {}
+
+# =====================================================
+# HEADER
+# =====================================================
+
+header = ctk.CTkFrame(
+    root,
+    height=90,
+    fg_color="#0F172A",
+    corner_radius=0
+)
+
+header.pack(fill="x")
+
+title = ctk.CTkLabel(
+    header,
+    text="📊 DATA VALIDATION HUB",
+    font=("Segoe UI", 30, "bold"),
+    text_color="white"
+)
+
+title.pack(pady=(15, 0))
+
+subtitle = ctk.CTkLabel(
+    header,
+    text="Enterprise Data Quality Platform",
+    font=("Segoe UI", 12),
+    text_color="#CBD5E1"
+)
+
+subtitle.pack()
+
+# =====================================================
+# MAIN CONTAINER
+# =====================================================
+
+main_container = ctk.CTkFrame(
+    root,
+    fg_color="transparent"
+)
+
+main_container.pack(
+    fill="both",
+    expand=True,
+    padx=20,
+    pady=20
+)
+
+# =====================================================
+# LEFT PANEL
+# =====================================================
+
+left_panel = ctk.CTkFrame(
+    main_container,
+    width=450,
+    corner_radius=15
+)
+
+left_panel.pack(
+    side="left",
+    fill="y",
+    padx=(0, 15)
+)
+
+left_panel.pack_propagate(False)
+
+# =====================================================
+# VALIDATION TYPE
+# =====================================================
+
+validation_label = ctk.CTkLabel(
+    left_panel,
+    text="Validation Type",
+    font=("Segoe UI", 18, "bold")
+)
+
+validation_label.pack(
+    anchor="w",
+    padx=20,
+    pady=(20, 10)
+)
+
+validation_combo = ctk.CTkComboBox(
+    left_panel,
+    values=[
+        "Actuals Validation",
+        "Forecast Validation",
+        "Inventory Validation"
+    ],
+    height=40
+)
+
+validation_combo.set("Actuals Validation")
+
+validation_combo.pack(
+    fill="x",
+    padx=20
+)
+
+# =====================================================
+# FILE PICKERS
+# =====================================================
+
+files_frame = ctk.CTkFrame(
+    left_panel,
+    fg_color="transparent"
+)
+
+files_frame.pack(
+    fill="x",
+    padx=20,
+    pady=20
+)
+
+files = [
+    "Sales File",
+    "Item File",
+    "UOM File",
+    "Target File"
+]
+
+file_labels = {}
+
+for file_name in files:
+
+    ctk.CTkLabel(
+        files_frame,
+        text=file_name,
+        font=("Segoe UI", 14)
+    ).pack(
+        anchor="w",
+        pady=(8, 2)
+    )
+
+    row = ctk.CTkFrame(
+        files_frame,
+        fg_color="transparent"
+    )
+
+    row.pack(fill="x")
+
+    label = ctk.CTkLabel(
+        row,
+        text="No file selected",
+        anchor="w",
+        height=35
+    )
+
+    label.pack(
+        side="left",
+        fill="x",
+        expand=True
+    )
+
+    file_labels[file_name] = label
+
+    def choose_file(name=file_name):
+
+        file = filedialog.askopenfilename(
+            filetypes=[
+                ("CSV Files", "*.csv"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if file:
+            file_paths[name] = file
+            file_labels[name].configure(
+                text=file.split("/")[-1]
+            )
+
+    btn = ctk.CTkButton(
+        row,
+        text="Browse",
+        width=90,
+        command=choose_file
+    )
+
+    btn.pack(
+        side="right",
+        padx=(10, 0)
+    )
+
+# =====================================================
+# RUN BUTTON
+# =====================================================
+
+run_btn = ctk.CTkButton(
+    left_panel,
+    text="▶ Run Validation",
+    height=50,
+    font=("Segoe UI", 16, "bold"),
+    fg_color=SUCCESS
+)
+
+run_btn.pack(
+    fill="x",
+    padx=20,
+    pady=(15, 10)
+)
+
+# =====================================================
+# STATUS
+# =====================================================
+
+status_label = ctk.CTkLabel(
+    left_panel,
+    text="Ready",
+    font=("Segoe UI", 14, "bold"),
+    text_color=PRIMARY
+)
+
+status_label.pack()
+
+progress = ctk.CTkProgressBar(left_panel)
+
+progress.pack(
+    fill="x",
+    padx=20,
+    pady=15
+)
+
+progress.set(0)
+
+# =====================================================
+# RIGHT PANEL
+# =====================================================
+
+right_panel = ctk.CTkFrame(
+    main_container,
+    fg_color="transparent"
+)
+
+right_panel.pack(
+    side="left",
+    fill="both",
+    expand=True
+)
+
+# =====================================================
+# KPI CARDS
+# =====================================================
+
+kpi_frame = ctk.CTkFrame(
+    right_panel,
+    fg_color="transparent"
+)
+
+kpi_frame.pack(fill="x")
+
+
+def create_card(parent, title):
+
+    card = ctk.CTkFrame(
+        parent,
+        corner_radius=15,
+        height=120
+    )
+
+    card.pack(
+        side="left",
+        fill="x",
+        expand=True,
+        padx=10
+    )
+
+    ctk.CTkLabel(
+        card,
+        text=title,
+        font=("Segoe UI", 14)
+    ).pack(
+        pady=(20, 5)
+    )
+
+    value = ctk.CTkLabel(
+        card,
+        text="0",
+        font=("Segoe UI", 32, "bold")
+    )
+
+    value.pack()
+
+    return value
+
+
+records_value = create_card(kpi_frame, "Records")
+passed_value = create_card(kpi_frame, "Passed")
+failed_value = create_card(kpi_frame, "Failed")
+duration_value = create_card(kpi_frame, "Match %")
+
+# =====================================================
+# LOGS SECTION
+# =====================================================
+
+logs_frame = ctk.CTkFrame(
+    right_panel,
+    corner_radius=15
+)
+
+logs_frame.pack(
+    fill="both",
+    expand=True,
+    pady=15
+)
+
+ctk.CTkLabel(
+    logs_frame,
+    text="Validation Logs",
+    font=("Segoe UI", 20, "bold")
+).pack(
+    anchor="w",
+    padx=20,
+    pady=(15, 10)
+)
+
+log_text = ctk.CTkTextbox(
+    logs_frame,
+    font=("Consolas", 12)
+)
+
+log_text.pack(
+    fill="both",
+    expand=True,
+    padx=20,
+    pady=(0, 20)
+)
+
+# =====================================================
+# LOG FUNCTION
+# =====================================================
+
+def add_log(message):
+
+    log_text.insert(
+        "end",
+        str(message) + "\n"
+    )
+
+    log_text.see("end")
+
+    root.update_idletasks()
+
+
+# =====================================================
+# VALIDATION FUNCTION
+# =====================================================
+
+def run_validation():
+
+    try:
+
+        required_files = [
+            "Sales File",
+            "Item File",
+            "UOM File",
+            "Target File"
+        ]
+
+        for file_name in required_files:
+
+            if file_name not in file_paths:
+
+                add_log(
+                    f"Missing file: {file_name}"
+                )
+
+                status_label.configure(
+                    text="Missing File"
+                )
+
+                return
+
+        log_text.delete(
+            "1.0",
+            "end"
+        )
+
+        status_label.configure(
+            text="Running..."
+        )
+
+        progress.configure(
+            mode="indeterminate"
+        )
+
+        progress.start()
+
+        add_log("=" * 60)
+        add_log("ACTUALS VALIDATION STARTED")
+        add_log("=" * 60)
+
+        result = actuals_validation(
+            file_paths["Sales File"],
+            file_paths["Item File"],
+            file_paths["UOM File"],
+            file_paths["Target File"],
+            log_callback=add_log
+        )
+
+        # KPI CARDS
+
+        records_value.configure(
+            text=f"{result['summary']['Records']:,}"
+        )
+
+        passed_value.configure(
+            text=f"{result['summary']['Passed']:,}"
+        )
+
+        failed_value.configure(
+            text=f"{result['summary']['Failed']:,}"
+        )
+
+        duration_value.configure(
+            text=f"{result['summary']['Match %']}%"
+        )
+
+        add_log("")
+        add_log("=" * 60)
+        add_log("VALIDATION SUMMARY")
+        add_log("=" * 60)
+
+        for key, value in result["details"].items():
+
+            add_log(
+                f"{key:<25}: {value}"
+            )
+
+        add_log("")
+        add_log(
+            f"Excel Report Generated : "
+            f"{result['output_file']}"
+        )
+
+        status_label.configure(
+            text="Completed ✅"
+        )
+
+        progress.stop()
+        progress.set(1)
+
+    except Exception as e:
+
+        progress.stop()
+
+        status_label.configure(
+            text="Failed ❌"
+        )
+
+        add_log("")
+        add_log(
+            f"ERROR : {str(e)}"
+        )
+
+# =====================================================
+# THREAD RUNNER
+# =====================================================
+
+def run_thread():
+
+    threading.Thread(
+        target=run_validation,
+        daemon=True
+    ).start()
+
+# =====================================================
+# BUTTON EVENT
+# =====================================================
+
+run_btn.configure(
+    command=run_thread
+)
+
+# =====================================================
+# START APP
+# =====================================================
+
+root.mainloop()

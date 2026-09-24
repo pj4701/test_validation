@@ -1,0 +1,581 @@
+import pandas as pd
+import gc as gc
+
+# ==================================================
+# FILE NAMES
+# ==================================================
+
+import os
+import glob
+from datetime import datetime
+
+# =====================================================
+# SCRIPT DIRECTORY
+# =====================================================
+
+SCRIPT_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+# =====================================================
+# AUTO PICK FILES
+# =====================================================
+
+source_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*ASP_Source*.csv"
+    )
+)
+
+target_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*ASP_Tenant*Currnent*Future*.csv"
+    )
+)
+
+mapping_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*Demand.Domain_Mapping*.csv"
+    )
+)
+
+rejection_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*ASP Rejection*.csv"
+    )
+)
+
+if not source_files:
+    raise FileNotFoundError(
+        "ASP Source file not found."
+    )
+
+if not target_files:
+    raise FileNotFoundError(
+        "ASP Tenant file not found."
+    )
+
+if not mapping_files:
+    raise FileNotFoundError(
+        "Demand Domain Mapping file not found."
+    )
+
+if not rejection_files:
+    raise FileNotFoundError(
+        "ASP Rejection file not found."
+    )
+
+source_file = source_files[0]
+target_file = target_files[0]
+mapping_file = mapping_files[0]
+rejection_file = rejection_files[0]
+
+print(f"Source File    : {source_file}")
+print(f"Target File    : {target_file}")
+print(f"Mapping File   : {mapping_file}")
+print(f"Rejection File : {rejection_file}")
+
+MAX_ROWS = 1000000
+
+# ==================================================
+# STEP 1 - READ SOURCE
+# ==================================================
+
+print("STEP 1 - Reading Source File")
+src = pd.read_csv(source_file)
+
+# ==================================================
+# STEP 2 - READ TARGET
+# ==================================================
+
+print("STEP 2 - Reading Target File")
+tgt = pd.read_csv(target_file)
+
+# ==================================================
+# STEP 3 - READ MAPPING
+# ==================================================
+
+print("STEP 3 - Reading Mapping File")
+map_df = pd.read_csv(mapping_file)
+
+src.columns = src.columns.str.strip()
+tgt.columns = tgt.columns.str.strip()
+map_df.columns = map_df.columns.str.strip()
+
+# ==================================================
+# STEP 3A - READ REJECTION FILE
+# ==================================================
+
+print("STEP 3A - Reading Rejection File")
+
+# Physical row count from file
+with open(
+    rejection_file,
+    "r",
+    encoding="utf-8",
+    errors="ignore"
+) as f:
+    total_rejection_records = sum(1 for _ in f) - 1
+
+print(
+    f"Total Rejection Records In File : "
+    f"{total_rejection_records:,}"
+)
+
+# Read file
+rej = pd.read_csv(
+    rejection_file,
+    engine="python",
+    on_bad_lines="skip",
+    encoding_errors="ignore"
+)
+
+rej.columns = rej.columns.str.strip()
+
+# Last column is rejection reason (header missing)
+rej.rename(
+    columns={
+        rej.columns[-1]: "Rejection Reason"
+    },
+    inplace=True
+)
+
+print(
+    f"Successfully Loaded Rows : "
+    f"{len(rej):,}"
+)
+
+print(
+    f"Rows Failed During Parsing : "
+    f"{total_rejection_records - len(rej):,}"
+)
+
+# ==================================================
+# STEP 5 - DEMAND DOMAIN LOOKUP
+# ==================================================
+
+print("STEP 5 - Creating Demand Domain Lookup")
+
+lookup_dict = dict(
+    zip(
+        map_df["Demand Domain.[Planning Demand Domain$DisplayName]"],
+        map_df["Demand Domain.[End Market Child Code]"]
+    )
+)
+
+src["Planning Demand Domain"] = (
+    src["End Market.[End Market Child]"]
+    .astype(str)
+    .str.strip()
+    .map(lookup_dict)
+)
+
+unmapped = src[src["Planning Demand Domain"].isna()]
+
+print(f"Unmapped Demand Domains : {len(unmapped):,}")
+
+# ==================================================
+# STEP 6 - ACCOUNT
+# ==================================================
+
+print("STEP 6 - Creating Planning Account")
+
+src["Planning Account"] = (
+    src["SoldTo Customer.[Sold To]"]
+    .astype(str)
+    .str.split(":")
+    .str[-1]
+    .str.strip()
+)
+
+# ==================================================
+# STEP 7 - REGION
+# ==================================================
+
+print("STEP 7 - Creating Planning Region")
+
+src["Planning Region"] = (
+    src["Ship To Region.[Ship To]"]
+    .astype(str)
+    .str.split(":")
+    .str[-1]
+    .str.strip()
+)
+
+print("STEP 7A - Preparing Rejection File")
+
+rej["Planning Demand Domain"] = (
+    rej["End Market.[End Market Child]"]
+    .astype(str)
+    .str.strip()
+    .map(lookup_dict)
+)
+
+rej["Planning Account"] = (
+    rej["SoldTo Customer.[Sold To]"]
+    .astype(str)
+    .str.split(":")
+    .str[-1]
+    .str.strip()
+)
+
+rej["Planning Region"] = (
+    rej["Ship To Region.[Ship To]"]
+    .astype(str)
+    .str.split(":")
+    .str[-1]
+    .str.strip()
+)
+
+rej.rename(columns={
+    "Product.[Product ID]": "Planning Item",
+    "[Time].[Month]": "Month"
+}, inplace=True)
+
+ 
+# ==================================================
+# STEP 8 - RENAME SOURCE
+# ==================================================
+
+print("STEP 8 - Renaming Source Columns")
+
+src.rename(columns={
+    "Product.[Product ID]": "Planning Item",
+    "[Time].[Month]": "Month",
+    "Average Sales Price Override": "Unit Price Override WRK"
+}, inplace=True)
+
+# ==================================================
+# STEP 9 - RENAME TARGET
+# ==================================================
+
+print("STEP 9 - Renaming Target Columns")
+
+tgt.rename(columns={
+    "Item.[Planning Item]": "Planning Item",
+    "Demand Domain.[Planning Demand Domain]": "Planning Demand Domain",
+    "Account.[Planning Account]": "Planning Account",
+    "Region.[Planning Region]": "Planning Region",
+    "Time.[Month]": "Month"
+}, inplace=True)
+
+# ==================================================
+# STEP 10 - STANDARDIZE KEYS
+# ==================================================
+
+print("STEP 10 - Standardizing Keys")
+
+keys = [
+    "Planning Item",
+    "Planning Demand Domain",
+    "Planning Account",
+    "Planning Region",
+    "Month"
+]
+
+for col in keys:
+    src[col] = src[col].astype(str).str.strip()
+    tgt[col] = tgt[col].astype(str).str.strip()
+
+for col in keys:
+    rej[col] = (
+        rej[col]
+        .astype(str)
+        .str.strip()
+    )
+
+# ==================================================
+# STEP 11 - PRICE CONVERSION
+# ==================================================
+
+print("STEP 11 - Converting Prices")
+
+src["Unit Price Override WRK"] = pd.to_numeric(
+    src["Unit Price Override WRK"],
+    errors="coerce"
+)
+
+tgt["Unit Price Override WRK"] = pd.to_numeric(
+    tgt["Unit Price Override WRK"],
+    errors="coerce"
+)
+
+# ==================================================
+# CHECK DUPLICATES
+# ==================================================
+
+print("\nChecking Duplicate Keys")
+
+src_dup = src.duplicated(subset=keys).sum()
+tgt_dup = tgt.duplicated(subset=keys).sum()
+
+print(f"Source Duplicate Keys : {src_dup:,}")
+print(f"Target Duplicate Keys : {tgt_dup:,}")
+
+# ==================================================
+# STEP 12 - MERGE
+# ==================================================
+
+print("STEP 12 - Starting Merge")
+print(f"Source Rows : {len(src):,}")
+print(f"Target Rows : {len(tgt):,}")
+
+merged = pd.merge(
+    src,
+    tgt,
+    on=keys,
+    how="outer",
+    indicator=True,
+    suffixes=("_SRC", "_TGT")
+)
+
+print("STEP 13 - Merge Completed")
+print(f"Merged Rows : {len(merged):,}")
+
+# ==================================================
+# STEP 14 - EXCEPTIONS
+# ==================================================
+
+print("STEP 14 - Creating Exception Sets")
+
+source_only = merged.loc[
+    merged["_merge"] == "left_only"
+]
+
+target_only = merged.loc[
+    merged["_merge"] == "right_only"
+]
+
+both_mask = merged["_merge"] == "both"
+
+intersection_count = int(both_mask.sum())
+
+# ==================================================
+# STEP 15 - PRICE MISMATCH
+# ==================================================
+
+print("STEP 15 - Finding Price Mismatches")
+
+price_mismatch = merged.loc[
+    both_mask &
+    (
+        merged["Unit Price Override WRK_SRC"]
+        .fillna(-999999)
+        .round(4)
+        !=
+        merged["Unit Price Override WRK_TGT"]
+        .fillna(-999999)
+        .round(4)
+    )
+]
+
+matched_count = intersection_count - len(price_mismatch)
+
+# ==================================================
+# STEP 15A - REJECTION ANALYSIS
+# ==================================================
+
+print("STEP 15A - Analyzing Rejections")
+
+rejection_summary = (
+    rej["Rejection Reason"]
+    .value_counts()
+    .reset_index()
+)
+
+rejection_summary.columns = [
+    "Rejection Reason",
+    "Count"
+]
+
+source_only_rejected = pd.merge(
+    source_only,
+    rej[keys + ["Rejection Reason"]],
+    on=keys,
+    how="inner"
+)
+
+print(
+    f"SourceOnly Records Found In Rejection File : "
+    f"{len(source_only_rejected):,}"
+)
+# ==================================================
+# REJECTION %
+# ==================================================
+
+rejection_pct = round(
+    (
+        total_rejection_records
+        / len(src)
+    ) * 100,
+    2
+)
+
+accepted_pct = round(
+    100 - rejection_pct,
+    2
+)
+
+# ==================================================
+# STEP 16 - SUMMARY
+# ==================================================
+
+print("\nSTEP 16 - Creating Summary")
+
+summary_df = pd.DataFrame({
+    "Metric": [
+        "Source File Count",
+        "Target File Count",
+        "Rejected Records In File",
+        "Rejected Records Loaded",
+        "Rejected Records Parse Failed",
+        "SourceOnly Found In Rejections",
+        "Intersection Count",
+        "Matched Records",
+        "Price Mismatch",
+        "Source Only Records",
+        "Target Only Records",
+        "% Rejection",
+        "% Accepted"
+    ],
+    "Count": [
+        len(src),
+        len(tgt),
+        total_rejection_records,
+        len(rej),
+        total_rejection_records - len(rej),
+        len(source_only_rejected),
+        intersection_count,
+        matched_count,
+        len(price_mismatch),
+        len(source_only),
+        len(target_only),
+        f"{rejection_pct:.2f}%",
+        f"{accepted_pct:.2f}%"
+    ]
+})
+
+print(summary_df)
+
+# ==================================================
+# STEP 17 - MAIN WORKBOOK
+# ==================================================
+
+print("\nSTEP 17 - Creating Main Workbook")
+
+main_output = os.path.join(SCRIPT_DIR,"ASP_Current_Future_Comparison.xlsx")
+
+with pd.ExcelWriter(
+    main_output,
+    engine="openpyxl"
+) as writer:
+
+    print("STEP 17.1 - Writing Summary")
+
+    summary_df.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False
+    )
+
+    print("STEP 17.2 - Writing PriceMismatch")
+
+    price_mismatch.to_excel(
+        writer,
+        sheet_name="PriceMismatch",
+        index=False
+    )
+
+    print("STEP 17.3 - Writing SourceOnly")
+
+    source_only.to_excel(
+        writer,
+        sheet_name="SourceOnly",
+        index=False
+    )
+
+    print("STEP 17.4 - Writing Rejected Records")
+
+    source_only_rejected.to_excel(
+    writer,
+    sheet_name="RejectedRecords",
+    index=False
+    )
+
+    print("STEP 17.5 - Writing Rejection Summary")
+
+    rejection_summary.to_excel(
+    writer,
+    sheet_name="RejectionSummary",
+    index=False
+    )
+
+print("STEP 18 - Main Workbook Created")
+
+# ==================================================
+# STEP 19 - TARGET ONLY FILES
+# ==================================================
+
+print("\nSTEP 19 - Creating TargetOnly Files")
+
+total_chunks = (
+    len(target_only) + MAX_ROWS - 1
+) // MAX_ROWS
+
+print(f"TargetOnly Rows : {len(target_only):,}")
+print(f"Files To Create : {total_chunks}")
+
+for i in range(total_chunks):
+
+    start_row = i * MAX_ROWS
+    end_row = min(
+        (i + 1) * MAX_ROWS,
+        len(target_only)
+    )
+
+    print(f"\nSTEP 19.{i+1}")
+    print(f"Rows : {start_row:,} to {end_row:,}")
+
+    chunk = target_only.iloc[
+        start_row:end_row
+    ].copy()
+
+    file_name = f"TargetOnly_Part_{i+1}.xlsx"
+
+    print(f"Creating {file_name}")
+
+    with pd.ExcelWriter(
+        file_name,
+        engine="openpyxl"
+    ) as writer:
+
+        chunk.to_excel(
+            writer,
+            sheet_name="TargetOnly",
+            index=False
+        )
+
+    print(f"Completed {file_name}")
+
+    del chunk
+    gc.collect()
+
+    print(f"Memory Released - Part {i+1}")
+
+# ==================================================
+# STEP 20 - COMPLETED
+# ==================================================
+
+print("\n=================================")
+print("STEP 20 - PROCESS COMPLETED")
+print("=================================")
+
+print("\nGenerated Files:")
+print(main_output)
+
+for i in range(total_chunks):
+    print(f"TargetOnly_Part_{i+1}.xlsx")

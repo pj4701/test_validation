@@ -1,0 +1,711 @@
+import pandas as pd
+import numpy as np
+
+def run_validation(
+    sales_file,
+    item_file,
+    uom_file,
+    target_file,
+    log_callback=None
+):
+    output_file = "ActualData_Validation_Report.xlsx"
+
+    # ==========================================================
+    # READ FILES
+    # ==========================================================
+    if log_callback:
+        log_callback("Reading Files...")
+
+    sales = pd.read_csv(
+        sales_file,
+        sep="^",
+        dtype=str,
+        low_memory=False
+    )
+
+    items = pd.read_csv(
+        item_file,
+        sep="^",
+        dtype=str,
+        low_memory=False
+    )
+
+    uom = pd.read_csv(
+        uom_file,
+        sep="^",
+        dtype=str,
+        low_memory=False
+    )
+
+    target = pd.read_csv(
+        target_file,
+        dtype=str,
+        low_memory=False
+    )
+
+    sales.columns = sales.columns.str.strip()
+    items.columns = items.columns.str.strip()
+    uom.columns = uom.columns.str.strip()
+    target.columns = target.columns.str.strip()
+
+    if log_callback:
+        log_callback(f"Sales Count  : {len(sales):,}")
+
+    if log_callback:
+        log_callback(f"Target Count : {len(target):,}")
+
+# ==========================================================
+# ITEM MASTER LOOKUP
+# ==========================================================
+
+    item_lookup = items[
+        ["Item", "W_BusinessSegmentName"]
+    ].drop_duplicates()
+
+
+    print("Expected_UOM dtype =", sales["Expected_UOM"].dtype)
+    print("UOM dtype =", uom_lookup["UOM"].dtype)
+    sales = sales.merge(
+        item_lookup,
+        on="Item",
+        how="left"
+    )
+
+    missing_item = sales[
+        sales["W_BusinessSegmentName"].isna()
+    ].copy()
+
+# ==========================================================
+# DETERMINE EXPECTED UOM
+# ==========================================================
+
+    def determine_uom(segment):
+
+        if pd.isna(segment):
+            return np.nan
+
+        segment = str(segment).upper().strip()
+
+        if segment == "CORRUGATED PACKAGING":
+            return "MSF"
+
+        elif segment == "CONSUMER PACKAGING":
+            return "EA"
+
+        elif segment in (
+            "CORRUGATED MILL GROUP",
+            "CONSUMER PACKAGING MILLS"
+        ):
+            return "TONS"
+
+        return np.nan
+
+
+    sales["Expected_UOM"] = sales[
+        "W_BusinessSegmentName"
+    ].apply(determine_uom)
+
+    # ==========================================================
+    # UOM LOOKUP
+    # ==========================================================
+
+    uom["UOMConversion"] = pd.to_numeric(
+        uom["UOMConversion"],
+        errors="coerce"
+    )
+
+    uom_lookup = uom[
+        [
+            "ProductID",
+            "UOM",
+            "UOMConversion"
+        ]
+    ].drop_duplicates()
+    if log_callback:
+
+        log_callback(f"Expected_UOM dtype = {sales['Expected_UOM'].dtype}")
+
+        log_callback(f"UOM dtype = {uom_lookup['UOM'].dtype}")
+
+    sales = sales.merge(
+        uom_lookup,
+        left_on=["Item", "Expected_UOM"],
+        right_on=["ProductID", "UOM"],
+        how="left"
+    )
+
+    missing_uom = sales[
+        sales["UOMConversion"].isna()
+    ].copy()
+
+    zero_uom = sales[
+        sales["UOMConversion"] == 0
+    ].copy()
+
+    # ==========================================================
+    # REMOVE NULL / ZERO CONVERSION
+    # ==========================================================
+
+    sales = sales[
+        sales["UOMConversion"].notna()
+    ].copy()
+
+    sales = sales[
+        sales["UOMConversion"] != 0
+    ].copy()
+
+    # ==========================================================
+    # NUMERIC CONVERSIONS
+    # ==========================================================
+
+    sales["SORequestedQuantity"] = pd.to_numeric(
+        sales["SORequestedQuantity"],
+        errors="coerce"
+    )
+
+    sales["SOReturnedQuantity"] = pd.to_numeric(
+        sales["SOReturnedQuantity"],
+        errors="coerce"
+    )
+
+    negative_qty = sales[
+        sales["SORequestedQuantity"] < 0
+    ].copy()
+
+    zero_qty = sales[
+        sales["SORequestedQuantity"] == 0
+    ].copy()
+
+    # ==========================================================
+    # SQL CALCULATIONS
+    # ==========================================================
+
+    sales["Expected_ActualRaw"] = (
+        sales["SORequestedQuantity"]
+        * sales["UOMConversion"]
+    )
+
+    sales["Expected_SWActualReturns"] = (
+        sales["SOReturnedQuantity"]
+        * sales["UOMConversion"]
+    )
+
+    # ==========================================================
+    # DATE LOGIC
+    # ==========================================================
+
+    sales["SORequestedDeliveryDate"] = pd.to_datetime(
+        sales["SORequestedDeliveryDate"],
+        errors="coerce"
+    )
+
+    sales["StartDay"] = (
+        sales["SORequestedDeliveryDate"]
+        .dt.to_period("M")
+        .dt.to_timestamp()
+    )
+
+    sales["StartDay"] = (
+        sales["StartDay"]
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    # ==========================================================
+    # DIMENSIONS
+    # SQL MAPPING
+    # ==========================================================
+
+    sales["Location"] = sales["ShipFrom"]
+    sales["Region"] = sales["ShipToID"]
+    sales["DemandDomain"] = sales["W_EndMarketChild"]
+    sales["Account"] = sales["SoldToID"]
+    sales["Channel"] = "All"
+    sales["PnL"] = "All"
+
+    # ==========================================================
+    # STANDARDIZE SOURCE KEYS
+    # ==========================================================
+
+    for col in [
+        "Item",
+        "Location",
+        "Region",
+        "DemandDomain",
+        "Account",
+        "Channel",
+        "PnL"
+    ]:
+        sales[col] = (
+            sales[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    # ==========================================================
+    # OUTPUT GRAIN
+    # ==========================================================
+
+    keys = [
+        "Item",
+        "Location",
+        "Region",
+        "StartDay",
+        "DemandDomain",
+        "Account",
+        "Channel",
+        "PnL"
+    ]
+
+    expected = (
+        sales
+        .groupby(keys, dropna=False)
+        .agg(
+            {
+                "Expected_ActualRaw": "sum",
+                "Expected_SWActualReturns": "sum"
+            }
+        )
+        .reset_index()
+    )
+
+    # ==========================================================
+    # TARGET STANDARDIZATION
+    # ==========================================================
+
+    target = target.rename(
+        columns={
+            "Item.[Item]": "Item",
+            "Region.[Region]": "Region",
+            "Demand Domain.[Demand Domain]": "DemandDomain",
+            "Time.[Day]": "StartDay",
+            "Account.[Account]": "Account",
+            "Location.[Location]": "Location",
+            "Channel.[Channel]": "Channel",
+            "PnL.[PnL]": "PnL",
+            "Actual Raw": "ActualRaw"
+        }
+    )
+
+    target["SWActualReturns"] = 0
+
+    target["ActualRaw"] = pd.to_numeric(
+        target["ActualRaw"],
+        errors="coerce"
+    )
+
+    target["StartDay"] = pd.to_datetime(
+        target["StartDay"],
+        errors="coerce"
+    )
+
+    target["StartDay"] = (
+        target["StartDay"]
+        .dt.strftime("%Y-%m-%d")
+    )
+
+    for col in [
+        "Item",
+        "Location",
+        "Region",
+        "DemandDomain",
+        "Account",
+        "Channel",
+        "PnL"
+    ]:
+        target[col] = (
+            target[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+    # ==========================================================
+    # DUPLICATES
+    # ==========================================================
+
+    source_duplicates = expected[
+        expected.duplicated(
+            subset=keys,
+            keep=False
+        )
+    ]
+
+    target_duplicates = target[
+        target.duplicated(
+            subset=keys,
+            keep=False
+        )
+    ]
+
+    # ==========================================================
+    # RECON
+    # ==========================================================
+
+    merged = pd.merge(
+        expected,
+        target[
+            keys + [
+                "ActualRaw",
+                "SWActualReturns"
+            ]
+        ],
+        on=keys,
+        how="outer",
+        indicator=True
+    )
+
+    merged["ActualRawVariance"] = (
+        merged["Expected_ActualRaw"].fillna(0)
+        -
+        merged["ActualRaw"].fillna(0)
+    )
+
+    merged["ReturnVariance"] = (
+        merged["Expected_SWActualReturns"].fillna(0)
+        -
+        merged["SWActualReturns"].fillna(0)
+    )
+
+    # ==========================================================
+    # OUTPUT SETS
+    # ==========================================================
+
+    matched = merged[
+        (merged["_merge"] == "both")
+        &
+        (
+            merged["ActualRawVariance"]
+            .round(5)
+            == 0
+        )
+    ]
+
+    actualraw_mismatch = merged[
+        (merged["_merge"] == "both")
+        &
+        (
+            merged["ActualRawVariance"]
+            .round(5)
+            != 0
+        )
+    ]
+
+    source_only = merged[
+        merged["_merge"] == "left_only"
+    ]
+
+    target_only = merged[
+        merged["_merge"] == "right_only"
+    ]
+
+    # ==========================================================
+    # ACTUAL RAW RECONCILIATION
+    # ==========================================================
+
+    source_actual_raw_total = (
+        expected["Expected_ActualRaw"]
+        .fillna(0)
+        .sum()
+    )
+
+    target_actual_raw_total = (
+        target["ActualRaw"]
+        .fillna(0)
+        .sum()
+    )
+
+    actual_raw_variance = (
+        source_actual_raw_total
+        - target_actual_raw_total
+    )
+
+    if target_actual_raw_total != 0:
+
+        actual_raw_variance_pct = (
+            actual_raw_variance
+            / target_actual_raw_total
+        ) * 100
+
+    else:
+
+        actual_raw_variance_pct = np.nan
+
+    # ==========================================================
+    # MATCH PERCENTAGE
+    # ==========================================================
+
+    if len(expected) > 0:
+
+        match_pct = (
+            len(matched)
+            / len(expected)
+        ) * 100
+
+    else:
+
+        match_pct = 0
+
+    # ==========================================================
+    # RECON DATAFRAME
+    # ==========================================================
+
+    actual_raw_recon = pd.DataFrame({
+        "Metric": [
+            "Expected Actual Raw Total",
+            "Target Actual Raw Total",
+            "Actual Raw Variance",
+            "Actual Raw Variance %",
+            "Matched Records",
+            "Expected Records",
+            "Match %"
+        ],
+        "Value": [
+            source_actual_raw_total,
+            target_actual_raw_total,
+            actual_raw_variance,
+            actual_raw_variance_pct,
+            len(matched),
+            len(expected),
+            match_pct
+        ]
+    })
+
+    # print("\n=================================================")
+    # print("ACTUAL RAW RECONCILIATION")
+    # print("=================================================")
+
+    # print(
+    #     f"Expected Total : {source_actual_raw_total:,.2f}"
+    # )
+
+    # print(
+    #     f"Target Total   : {target_actual_raw_total:,.2f}"
+    # )
+
+    # print(
+    #     f"Variance       : {actual_raw_variance:,.2f}"
+    # )
+
+    # print(
+    #     f"Variance %     : {actual_raw_variance_pct:.4f}%"
+    # )
+
+    # print(
+    #     f"Match %        : {match_pct:.2f}%"
+    # )
+
+    # ==========================================================
+    # SUMMARY
+    # ==========================================================
+
+    summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Sales Rows",
+                "Target Rows",
+                "Expected Rows",
+                "Matched",
+                "ActualRaw Mismatch",
+                "Source Only",
+                "Target Only",
+                "Missing Item",
+                "Missing UOM",
+                "Zero UOM",
+                "Negative Quantity",
+                "Zero Quantity",
+                "Source Duplicates",
+                "Target Duplicates",
+                "Expected Actual Raw Total",
+                "Target Actual Raw Total",
+                "Actual Raw Variance",
+                "Actual Raw Variance %",
+                "Match %"
+            ],
+            "Count": [
+                len(sales),
+                len(target),
+                len(expected),
+                len(matched),
+                len(actualraw_mismatch),
+                len(source_only),
+                len(target_only),
+                len(missing_item),
+                len(missing_uom),
+                len(zero_uom),
+                len(negative_qty),
+                len(zero_qty),
+                len(source_duplicates),
+                len(target_duplicates),
+                source_actual_raw_total,
+                target_actual_raw_total,
+                actual_raw_variance,
+                actual_raw_variance_pct,
+                match_pct
+            ]
+        }
+    )
+
+
+    # ==========================================================
+    # EXPORT
+    # ==========================================================
+
+    with pd.ExcelWriter(
+        output_file,
+        engine="openpyxl"
+    ) as writer:
+
+        summary.to_excel(
+            writer,
+            sheet_name="01_Summary",
+            index=False
+        )
+
+        actualraw_mismatch.to_excel(
+            writer,
+            sheet_name="02_ActualRaw_Mismatch",
+            index=False
+        )
+
+        source_only.to_excel(
+            writer,
+            sheet_name="03_Source_Only",
+            index=False
+        )
+
+        target_only.to_excel(
+            writer,
+            sheet_name="04_Target_Only",
+            index=False
+        )
+
+        missing_item.to_excel(
+            writer,
+            sheet_name="05_Missing_Item",
+            index=False
+        )
+
+        missing_uom.to_excel(
+            writer,
+            sheet_name="06_Missing_UOM",
+            index=False
+        )
+
+        matched.to_excel(
+            writer,
+            sheet_name="07_Matched",
+            index=False
+        )
+
+        source_duplicates.to_excel(
+            writer,
+            sheet_name="08_Source_Duplicates",
+            index=False
+        )
+
+        target_duplicates.to_excel(
+            writer,
+            sheet_name="09_Target_Duplicates",
+            index=False
+        )
+        actual_raw_recon.to_excel(
+        writer,
+        sheet_name="10_ActualRaw_Recon",
+        index=False
+        )
+
+    # print("\nValidation Complete")
+    # print(f"Output File : {output_file}")
+    # print(f"Matched      : {len(matched):,}")
+    # print(f"Mismatch     : {len(actualraw_mismatch):,}")
+    # print(f"Source Only  : {len(source_only):,}")
+    # print(f"Target Only  : {len(target_only):,}")
+    # #validation summary 
+    # print("\n========== ACTUAL VALIDATION SUMMARY ==========")
+
+    # print(f"Sales Rows                 : {len(sales):,}")
+    # print(f"Target Rows                : {len(target):,}")
+    # print(f"Expected Rows              : {len(expected):,}")
+    # print(f"Matched                    : {len(matched):,}")
+    # print(f"ActualRaw Mismatch         : {len(actualraw_mismatch):,}")
+    # print(f"Source Only                : {len(source_only):,}")
+    # print(f"Target Only                : {len(target_only):,}")
+    # print(f"Missing Item               : {len(missing_item):,}")
+    # print(f"Missing UOM                : {len(missing_uom):,}")
+    # print(f"Zero UOM                   : {len(zero_uom):,}")
+    # print(f"Negative Quantity          : {len(negative_qty):,}")
+    # print(f"Zero Quantity              : {len(zero_qty):,}")
+    # print(f"Source Duplicates          : {len(source_duplicates):,}")
+    # print(f"Target Duplicates          : {len(target_duplicates):,}")
+
+    # print("-" * 50)
+
+    # print(f"Expected Actual Raw Total  : {source_actual_raw_total:,.2f}")
+    # print(f"Target Actual Raw Total    : {target_actual_raw_total:,.2f}")
+    # print(f"Actual Raw Variance        : {actual_raw_variance:,.2f}")
+    # print(f"Actual Raw Variance %      : {actual_raw_variance_pct:.2f}%")
+    # print(f"Match %                    : {match_pct:.2f}%")
+
+    if log_callback:
+        log_callback("\nValidation Complete")
+        log_callback(f"Output File : {output_file}")
+        log_callback(f"Matched      : {len(matched):,}")
+        log_callback(f"Mismatch     : {len(actualraw_mismatch):,}")
+        log_callback(f"Source Only  : {len(source_only):,}")
+        log_callback(f"Target Only  : {len(target_only):,}")
+
+        # validation summary
+        log_callback("\n========== ACTUAL VALIDATION SUMMARY ==========")
+
+        log_callback(f"Sales Rows                 : {len(sales):,}")
+        log_callback(f"Target Rows                : {len(target):,}")
+        log_callback(f"Expected Rows              : {len(expected):,}")
+        log_callback(f"Matched                    : {len(matched):,}")
+        log_callback(f"ActualRaw Mismatch         : {len(actualraw_mismatch):,}")
+        log_callback(f"Source Only                : {len(source_only):,}")
+        log_callback(f"Target Only                : {len(target_only):,}")
+        log_callback(f"Missing Item               : {len(missing_item):,}")
+        log_callback(f"Missing UOM                : {len(missing_uom):,}")
+        log_callback(f"Zero UOM                   : {len(zero_uom):,}")
+        log_callback(f"Negative Quantity          : {len(negative_qty):,}")
+        log_callback(f"Zero Quantity              : {len(zero_qty):,}")
+        log_callback(f"Source Duplicates          : {len(source_duplicates):,}")
+        log_callback(f"Target Duplicates          : {len(target_duplicates):,}")
+
+        log_callback("-" * 50)
+
+        log_callback(f"Expected Actual Raw Total  : {source_actual_raw_total:,.2f}")
+        log_callback(f"Target Actual Raw Total    : {target_actual_raw_total:,.2f}")
+        log_callback(f"Actual Raw Variance        : {actual_raw_variance:,.2f}")
+        log_callback(f"Actual Raw Variance %      : {actual_raw_variance_pct:.2f}%")
+        log_callback(f"Match %                    : {match_pct:.2f}%")
+
+    # print("=" * 50)
+
+    return {
+        "summary": {
+            "Records": len(expected),
+            "Passed": len(matched),
+            "Failed": len(actualraw_mismatch),
+            "Match %": round(match_pct, 2)
+        },
+
+        "details": {
+            "Sales Rows": len(sales),
+            "Target Rows": len(target),
+            "Expected Rows": len(expected),
+            "Matched": len(matched),
+            "ActualRaw Mismatch": len(actualraw_mismatch),
+            "Source Only": len(source_only),
+            "Target Only": len(target_only),
+            "Missing Item": len(missing_item),
+            "Missing UOM": len(missing_uom),
+            "Negative Quantity": len(negative_qty),
+            "Zero Quantity": len(zero_qty),
+            "Variance": actual_raw_variance,
+            "Match %": round(match_pct, 2)
+        },
+
+        "output_file": output_file
+    }

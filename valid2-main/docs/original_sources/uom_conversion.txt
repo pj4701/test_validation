@@ -1,0 +1,559 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+
+import os
+import glob
+
+SCRIPT_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+# =====================================================
+# AUTO PICK FILES
+# =====================================================
+
+source_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*DP_UOM_Conversion*.csv"
+    )
+)
+
+target_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*Target_UOMConversion_Cons*.csv"
+    )
+)
+
+item_files = glob.glob(
+    os.path.join(
+        SCRIPT_DIR,
+        "*DP_Item*.csv"
+    )
+)
+
+if not source_files:
+    raise FileNotFoundError(
+        "Source_DP_UOM_Conversion file not found."
+    )
+
+if not target_files:
+    raise FileNotFoundError(
+        "Target_UOMConversion_Cons file not found."
+    )
+
+if not item_files:
+    raise FileNotFoundError(
+        "DP_Item file not found."
+    )
+
+SOURCE_FILE = source_files[0]
+TARGET_FILE = target_files[0]
+ITEM_FILE = item_files[0]
+
+print(f"Source File : {SOURCE_FILE}")
+print(f"Target File : {TARGET_FILE}")
+print(f"Item File   : {ITEM_FILE}")
+
+ROUND_DECIMALS = 3
+
+# ==============================================================================
+# START
+# ==============================================================================
+
+print("=" * 100)
+print("UOM CONVERSION RECONCILIATION STARTED")
+print("=" * 100)
+
+# ==============================================================================
+# READ SOURCE
+# ==============================================================================
+
+print("\nSTEP 1 - Reading Source File")
+
+src = pd.read_csv(
+    SOURCE_FILE,
+    sep="^",
+    dtype=str,
+    low_memory=False
+)
+
+print(f"Source Rows : {len(src):,}")
+
+# ==============================================================================
+# READ ITEM
+# ==============================================================================
+
+print("\nSTEP 2 - Reading Item File")
+
+item = pd.read_csv(
+    ITEM_FILE,
+    sep="^",
+    dtype=str,
+    low_memory=False
+)
+
+print(f"Item Rows : {len(item):,}")
+
+# ==============================================================================
+# READ TARGET
+# ==============================================================================
+
+print("\nSTEP 3 - Reading Target File")
+
+tgt = pd.read_csv(
+    TARGET_FILE,
+    dtype=str,
+    low_memory=False
+)
+
+print(f"Target Rows : {len(tgt):,}")
+
+# ==============================================================================
+# CLEAN DATA
+# ==============================================================================
+
+print("\nSTEP 4 - Cleaning Data")
+
+src.columns = src.columns.str.strip()
+item.columns = item.columns.str.strip()
+tgt.columns = tgt.columns.str.strip()
+
+src["ProductID"] = src["ProductID"].astype(str).str.strip()
+src["UOM"] = src["UOM"].astype(str).str.strip()
+
+item["Item"] = item["Item"].astype(str).str.strip()
+
+tgt["Item.[Planning Item]"] = (
+    tgt["Item.[Planning Item]"]
+    .astype(str)
+    .str.strip()
+)
+
+tgt["UOM.[UOM]"] = (
+    tgt["UOM.[UOM]"]
+    .astype(str)
+    .str.strip()
+)
+
+src["UOMConversion"] = pd.to_numeric(
+    src["UOMConversion"],
+    errors="coerce"
+)
+
+tgt["UOM Conversion"] = pd.to_numeric(
+    tgt["UOM Conversion"],
+    errors="coerce"
+)
+
+print("Data Cleaning Completed")
+
+# ==============================================================================
+# COUNTS
+# ==============================================================================
+
+source_raw_count = len(src)
+
+# ==============================================================================
+# AGGREGATION DUPLICATES
+# ==============================================================================
+
+print("\nSTEP 5 - Finding Aggregation Duplicates")
+
+agg_details = (
+    src.groupby(
+        ["ProductID", "UOM"],
+        as_index=False
+    )
+    .agg(
+        Record_Count=("UOMConversion", "count"),
+        Sum_UOMConversion=("UOMConversion", "sum")
+    )
+)
+
+agg_details = agg_details[
+    agg_details["Record_Count"] > 1
+].copy()
+
+agg_details["Records_Reduced"] = (
+    agg_details["Record_Count"] - 1
+)
+
+aggregation_reduced_count = int(
+    agg_details["Records_Reduced"].sum()
+)
+
+print(
+    f"Duplicate ProductID+UOM Keys : {len(agg_details):,}"
+)
+
+print(
+    f"Records Reduced By Aggregation : "
+    f"{aggregation_reduced_count:,}"
+)
+
+# ==============================================================================
+# AGGREGATE SOURCE
+# ==============================================================================
+
+print("\nSTEP 6 - Aggregating Source")
+
+src_agg = (
+    src.groupby(
+        ["ProductID", "UOM"],
+        as_index=False
+    )["UOMConversion"]
+    .sum()
+)
+
+source_agg_count = len(src_agg)
+
+print(f"Source Raw Count        : {source_raw_count:,}")
+print(f"Source Aggregated Count : {source_agg_count:,}")
+
+# ==============================================================================
+# ITEM LOOKUP
+# ==============================================================================
+
+print("\nSTEP 7 - Joining DP_Item")
+
+item_lookup = item[
+    ["Item", "W_BusinessSegmentName"]
+].drop_duplicates()
+
+src_agg = src_agg.merge(
+    item_lookup,
+    left_on="ProductID",
+    right_on="Item",
+    how="left"
+)
+
+print("Join Completed")
+
+# ==============================================================================
+# REFERENCE UOM LOGIC
+# ==============================================================================
+
+print("\nSTEP 8 - Deriving Reference UOM")
+
+def get_reference_uom(segment):
+
+    segment = str(segment).strip().upper()
+
+    if segment == "CORRUGATED PACKAGING":
+        return "MSF"
+
+    elif segment == "CONSUMER PACKAGING":
+        return "EA"
+
+    elif segment == "CORRUGATED MILL GROUP":
+        return "TONS"
+
+    elif segment == "CONSUMER PACKAGING MILLS":
+        return "TONS"
+
+    return None
+
+src_agg["Reference_UOM"] = (
+    src_agg["W_BusinessSegmentName"]
+    .apply(get_reference_uom)
+)
+
+# ==============================================================================
+# REFERENCE VALUE
+# ==============================================================================
+
+print("\nSTEP 9 - Building Reference Values")
+
+reference_df = src_agg[
+    src_agg["UOM"] ==
+    src_agg["Reference_UOM"]
+].copy()
+
+reference_df = reference_df[
+    ["ProductID", "UOMConversion"]
+]
+
+reference_df.rename(
+    columns={
+        "UOMConversion": "Reference_Value"
+    },
+    inplace=True
+)
+
+print(
+    f"Reference Records : "
+    f"{len(reference_df):,}"
+)
+
+# ==============================================================================
+# JOIN REFERENCE VALUE
+# ==============================================================================
+
+print("\nSTEP 10 - Joining Reference Values")
+
+src_agg = src_agg.merge(
+    reference_df,
+    on="ProductID",
+    how="left"
+)
+
+before_filter = len(src_agg)
+
+src_agg = src_agg[
+    src_agg["Reference_Value"].fillna(0) != 0
+]
+
+after_filter = len(src_agg)
+
+print(
+    f"Removed Invalid Denominators : "
+    f"{before_filter - after_filter:,}"
+)
+
+# ==============================================================================
+# EXPECTED CONVERSION
+# ==============================================================================
+
+print("\nSTEP 11 - Calculating Expected Conversion")
+
+src_agg["Expected_Conversion"] = (
+    src_agg["UOMConversion"]
+    /
+    src_agg["Reference_Value"]
+)
+
+# ==============================================================================
+# BUSINESS KEY
+# ==============================================================================
+
+print("\nSTEP 12 - Creating Business Keys")
+
+src_agg["BusinessKey"] = (
+    src_agg["ProductID"]
+    + "|"
+    + src_agg["UOM"]
+)
+
+tgt["BusinessKey"] = (
+    tgt["Item.[Planning Item]"]
+    + "|"
+    + tgt["UOM.[UOM]"]
+)
+
+# ==============================================================================
+# SOURCE DATASET
+# ==============================================================================
+
+src_final = src_agg[
+    [
+        "BusinessKey",
+        "ProductID",
+        "UOM",
+        "W_BusinessSegmentName",
+        "Reference_UOM",
+        "Reference_Value",
+        "Expected_Conversion"
+    ]
+]
+
+# ==============================================================================
+# TARGET DATASET
+# ==============================================================================
+
+tgt_final = tgt[
+    [
+        "BusinessKey",
+        "Item.[Planning Item]",
+        "UOM.[UOM]",
+        "UOM Conversion"
+    ]
+]
+
+target_count = len(tgt_final)
+
+# ==============================================================================
+# RECONCILIATION
+# ==============================================================================
+
+print("\nSTEP 13 - Performing Reconciliation")
+
+recon = pd.merge(
+    src_final,
+    tgt_final,
+    on="BusinessKey",
+    how="outer",
+    indicator=True
+)
+
+print(f"Recon Rows : {len(recon):,}")
+
+# ==============================================================================
+# SOURCE MISSING
+# ==============================================================================
+
+source_missing = recon[
+    recon["_merge"] == "left_only"
+].copy()
+
+# ==============================================================================
+# TARGET EXTRA
+# ==============================================================================
+
+target_extra = recon[
+    recon["_merge"] == "right_only"
+].copy()
+
+# ==============================================================================
+# COMMON
+# ==============================================================================
+
+common = recon[
+    recon["_merge"] == "both"
+].copy()
+
+# ==============================================================================
+# ROUNDING
+# ==============================================================================
+
+print("\nSTEP 14 - Comparing Conversions")
+
+common["Expected_Rounded"] = (
+    common["Expected_Conversion"]
+    .round(ROUND_DECIMALS)
+)
+
+common["Target_Rounded"] = (
+    common["UOM Conversion"]
+    .round(ROUND_DECIMALS)
+)
+
+# ==============================================================================
+# MISMATCH
+# ==============================================================================
+
+mismatch_records = common[
+    common["Expected_Rounded"]
+    !=
+    common["Target_Rounded"]
+].copy()
+
+mismatch_records["Difference"] = (
+    mismatch_records["Expected_Rounded"]
+    -
+    mismatch_records["Target_Rounded"]
+)
+
+# ==============================================================================
+# SUMMARY
+# ==============================================================================
+
+print("\nSTEP 15 - Preparing Summary")
+
+summary = pd.DataFrame({
+
+    "Metric": [
+
+        "Source Raw Count",
+        "Source Aggregated Count",
+        "Target Count",
+        "Records Reduced By Aggregation",
+        "Source Missing Count",
+        "Target Extra Count",
+        "Conversion Mismatch Count",
+        "Source Missing %"
+
+    ],
+
+    "Value": [
+
+        source_raw_count,
+        source_agg_count,
+        target_count,
+        aggregation_reduced_count,
+        len(source_missing),
+        len(target_extra),
+        len(mismatch_records),
+
+        round(
+            (
+                len(source_missing)
+                / source_agg_count
+            ) * 100,
+            2
+        ) if source_agg_count else 0
+
+    ]
+})
+
+print("\nSUMMARY")
+print(summary)
+
+# ==============================================================================
+# OUTPUT FILE
+# ==============================================================================
+
+print("\nSTEP 16 - Writing Output")
+
+timestamp = datetime.now().strftime(
+    "%Y%m%d_%H%M%S"
+)
+
+output_file = os.path.join(SCRIPT_DIR,f"UOM_Conversion_Reconciliation_"
+    f"{timestamp}.xlsx"
+)
+
+with pd.ExcelWriter(
+    output_file,
+    engine="openpyxl"
+) as writer:
+
+    summary.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False
+    )
+
+    agg_details.to_excel(
+        writer,
+        sheet_name="Aggregation_Duplicates",
+        index=False
+    )
+
+    source_missing.to_excel(
+        writer,
+        sheet_name="Source_Missing",
+        index=False
+    )
+
+    target_extra.to_excel(
+        writer,
+        sheet_name="Target_Extra",
+        index=False
+    )
+
+    mismatch_records.to_excel(
+        writer,
+        sheet_name="Conversion_Mismatch",
+        index=False
+    )
+
+print("\nOutput Created Successfully")
+print(f"Output File : {output_file}")
+
+print("\nEXCEPTION COUNTS")
+print("-" * 50)
+print(f"Records Reduced By Aggregation : {aggregation_reduced_count:,}")
+print(f"Source Missing Count          : {len(source_missing):,}")
+print(f"Target Extra Count            : {len(target_extra):,}")
+print(f"Conversion Mismatch Count     : {len(mismatch_records):,}")
+print("-" * 50)
+
+print("\nRECONCILIATION COMPLETED")
+print("=" * 100)

@@ -1,0 +1,525 @@
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+# =====================================================
+# FILES
+# =====================================================
+
+SOURCE_FILE = "DP_AvgSalesPrice.csv"
+TARGET_FILE = "ASP_Tenant data for Past Months.csv"
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+OUTPUT_FILE = (
+    f"ASP_Reconciliation_Output_{timestamp}.xlsx"
+)
+
+SAMPLE_SIZE = 5000
+
+# =====================================================
+# READ FILES
+# =====================================================
+
+print("Reading Files...")
+
+src = pd.read_csv(
+    SOURCE_FILE,
+    sep="^",
+    low_memory=False
+)
+
+tgt = pd.read_csv(
+    TARGET_FILE,
+    low_memory=False
+)
+
+# =====================================================
+# CLEAN COLUMNS
+# =====================================================
+
+src.columns = src.columns.str.strip()
+tgt.columns = tgt.columns.str.strip()
+
+# =====================================================
+# SOURCE TRANSFORMATION
+# =====================================================
+
+src["Month"] = pd.to_datetime(
+    src["Month"],
+    errors="coerce"
+)
+
+src["Month"] = (
+    "M"
+    + src["Month"].dt.strftime("%m-%b-%Y")
+)
+
+src.rename(
+    columns={
+        "Item": "Planning Item",
+        "ShipToId": "Planning Region",
+        "SoldToId": "Planning Account",
+        "W_EndMarketChild": "Planning Demand Domain",
+        "ShipFrom": "Planning Location",
+        "AvgSalesPrice": "UnitPriceInput"
+    },
+    inplace=True
+)
+
+# =====================================================
+# TARGET TRANSFORMATION
+# =====================================================
+
+tgt.rename(
+    columns={
+        "Time.[Month]": "Month",
+        "Item.[Planning Item]": "Planning Item",
+        "Region.[Planning Region]": "Planning Region",
+        "Demand Domain.[Planning Demand Domain]":
+            "Planning Demand Domain",
+        "Account.[Planning Account]":
+            "Planning Account",
+        "Location.[Planning Location]":
+            "Planning Location"
+    },
+    inplace=True
+)
+
+# =====================================================
+# COMPARISON KEYS
+# =====================================================
+
+keys = [
+    "Month",
+    "Planning Item",
+    "Planning Region",
+    "Planning Demand Domain",
+    "Planning Account",
+    "Planning Location"
+]
+
+for col in keys:
+
+    src[col] = (
+        src[col]
+        .astype(str)
+        .str.strip()
+    )
+
+    tgt[col] = (
+        tgt[col]
+        .astype(str)
+        .str.strip()
+    )
+
+# =====================================================
+# NUMERIC CONVERSION
+# =====================================================
+
+src["UnitPriceInput"] = pd.to_numeric(
+    src["UnitPriceInput"],
+    errors="coerce"
+)
+
+src["TotalOrderPrice"] = pd.to_numeric(
+    src["TotalOrderPrice"],
+    errors="coerce"
+)
+
+tgt["Unit Price WRK"] = pd.to_numeric(
+    tgt["Unit Price WRK"],
+    errors="coerce"
+)
+
+tgt["Cons_Revenue"] = pd.to_numeric(
+    tgt["Cons_Revenue"],
+    errors="coerce"
+)
+
+# =====================================================
+# COUNTS BEFORE AGGREGATION
+# =====================================================
+
+source_raw_count = len(src)
+
+# =====================================================
+# SOURCE AGGREGATION
+# ASP = MAX
+# REVENUE = SUM
+# =====================================================
+
+print("Aggregating Source...")
+
+source_agg = (
+    src.groupby(
+        keys,
+        dropna=False
+    )
+    .agg({
+        "UnitPriceInput": "max",
+        "TotalOrderPrice": "sum"
+    })
+    .reset_index()
+)
+
+source_agg_count = len(source_agg)
+
+collapsed_count = (
+    source_raw_count
+    - source_agg_count
+)
+
+# =====================================================
+# BUSINESS KEY CREATION
+# =====================================================
+
+source_agg["BusinessKey"] = (
+    source_agg[keys]
+    .astype(str)
+    .agg(
+        "|".join,
+        axis=1
+    )
+)
+
+tgt["BusinessKey"] = (
+    tgt[keys]
+    .astype(str)
+    .agg(
+        "|".join,
+        axis=1
+    )
+)
+
+# =====================================================
+# INTERSECTION
+# =====================================================
+
+intersection = source_agg[
+    source_agg["BusinessKey"].isin(
+        tgt["BusinessKey"]
+    )
+]
+
+source_missing = source_agg[
+    ~source_agg["BusinessKey"].isin(
+        tgt["BusinessKey"]
+    )
+]
+
+target_extra = tgt[
+    ~tgt["BusinessKey"].isin(
+        source_agg["BusinessKey"]
+    )
+]
+
+# =====================================================
+# MATCHED RECORDS
+# =====================================================
+
+matched = pd.merge(
+    intersection,
+    tgt,
+    on="BusinessKey",
+    suffixes=(
+        "_SRC",
+        "_TGT"
+    )
+)
+
+# =====================================================
+# ASP VALIDATION
+# =====================================================
+
+matched["Price_SRC"] = (
+    matched["UnitPriceInput"]
+    .round(3)
+)
+
+matched["Price_TGT"] = (
+    matched["Unit Price WRK"]
+    .round(3)
+)
+
+price_match = matched[
+    matched["Price_SRC"]
+    ==
+    matched["Price_TGT"]
+]
+
+price_mismatch = matched[
+    matched["Price_SRC"]
+    !=
+    matched["Price_TGT"]
+].copy()
+
+if len(price_mismatch) > 0:
+
+    price_mismatch["Variance"] = (
+        price_mismatch["UnitPriceInput"]
+        -
+        price_mismatch["Unit Price WRK"]
+    )
+
+# =====================================================
+# REVENUE VALIDATION
+# =====================================================
+
+matched["Revenue_SRC"] = (
+    matched["TotalOrderPrice"]
+    .round(3)
+)
+
+matched["Revenue_TGT"] = (
+    matched["Cons_Revenue"]
+    .round(3)
+)
+
+revenue_match = matched[
+    matched["Revenue_SRC"]
+    ==
+    matched["Revenue_TGT"]
+]
+
+revenue_mismatch = matched[
+    matched["Revenue_SRC"]
+    !=
+    matched["Revenue_TGT"]
+].copy()
+
+if len(revenue_mismatch) > 0:
+
+    revenue_mismatch["RevenueVariance"] = (
+        matched["TotalOrderPrice"]
+        -
+        matched["Cons_Revenue"]
+    )
+
+# =====================================================
+# SAMPLES
+# =====================================================
+
+source_missing_sample = (
+    source_missing.head(SAMPLE_SIZE)
+)
+
+target_extra_sample = (
+    target_extra.head(SAMPLE_SIZE)
+)
+
+# =====================================================
+# ASP TOTALS
+# =====================================================
+
+source_asp_total = round(
+    source_agg["UnitPriceInput"].sum(),
+    2
+)
+
+target_asp_total = round(
+    tgt["Unit Price WRK"].sum(),
+    2
+)
+
+asp_variance = round(
+    source_asp_total
+    - target_asp_total,
+    2
+)
+
+# =====================================================
+# REVENUE TOTALS
+# =====================================================
+
+source_revenue_total = round(
+    source_agg["TotalOrderPrice"].sum(),
+    2
+)
+
+target_revenue_total = round(
+    tgt["Cons_Revenue"].sum(),
+    2
+)
+
+revenue_variance = round(
+    source_revenue_total
+    - target_revenue_total,
+    2
+)
+
+# =====================================================
+# PERCENTAGES
+# =====================================================
+
+source_missing_pct = round(
+    (
+        len(source_missing)
+        / source_agg_count
+    ) * 100,
+    2
+)
+
+target_extra_pct = round(
+    (
+        len(target_extra)
+        / len(tgt)
+    ) * 100,
+    2
+)
+
+# =====================================================
+# OVERALL SUMMARY
+# =====================================================
+
+summary = pd.DataFrame({
+
+    "Metric":[
+        "Source Raw Count",
+        "Source Aggregated Count",
+        "Tenant Count",
+        "Records Reduced By Aggregation",
+        "Intersection Count",
+        "Source Missing Count",
+        "Target Extra Count",
+        "Source Missing %",
+        "Target Extra %"
+    ],
+
+    "Value":[
+        source_raw_count,
+        source_agg_count,
+        len(tgt),
+        collapsed_count,
+        len(intersection),
+        len(source_missing),
+        len(target_extra),
+        source_missing_pct,
+        target_extra_pct
+    ]
+})
+
+# =====================================================
+# ASP SUMMARY
+# =====================================================
+
+asp_summary = pd.DataFrame({
+
+    "Metric":[
+        "Price Match Count",
+        "Price Mismatch Count",
+        "Source ASP Total",
+        "Tenant ASP Total",
+        "ASP Variance"
+    ],
+
+    "Value":[
+        len(price_match),
+        len(price_mismatch),
+        source_asp_total,
+        target_asp_total,
+        asp_variance
+    ]
+})
+
+# =====================================================
+# REVENUE SUMMARY
+# =====================================================
+
+revenue_summary = pd.DataFrame({
+
+    "Metric":[
+        "Revenue Match Count",
+        "Revenue Mismatch Count",
+        "Source Revenue Total",
+        "Tenant Revenue Total",
+        "Revenue Variance"
+    ],
+
+    "Value":[
+        len(revenue_match),
+        len(revenue_mismatch),
+        source_revenue_total,
+        target_revenue_total,
+        revenue_variance
+    ]
+})
+
+# =====================================================
+# WRITE OUTPUT
+# =====================================================
+
+print("Writing Output...")
+
+with pd.ExcelWriter(
+    OUTPUT_FILE,
+    engine="openpyxl"
+) as writer:
+
+    summary.to_excel(
+        writer,
+        sheet_name="Summary",
+        index=False
+    )
+
+    asp_summary.to_excel(
+        writer,
+        sheet_name="ASP_Summary",
+        index=False
+    )
+
+    revenue_summary.to_excel(
+        writer,
+        sheet_name="Revenue_Summary",
+        index=False
+    )
+
+    if len(price_mismatch) > 0:
+
+        price_mismatch.to_excel(
+            writer,
+            sheet_name="PriceMismatch",
+            index=False
+        )
+
+    if len(revenue_mismatch) > 0:
+
+        revenue_mismatch.to_excel(
+            writer,
+            sheet_name="RevenueMismatch",
+            index=False
+        )
+
+    source_missing_sample.to_excel(
+        writer,
+        sheet_name="SourceMissingSample",
+        index=False
+    )
+
+    target_extra_sample.to_excel(
+        writer,
+        sheet_name="TargetExtraSample",
+        index=False
+    )
+
+# =====================================================
+# COMPLETION
+# =====================================================
+
+print()
+print("=" * 60)
+print("RECONCILIATION COMPLETED")
+print("=" * 60)
+print(f"Output File : {OUTPUT_FILE}")
+print()
+
+print("Overall Summary")
+print(summary)
+
+print()
+print("ASP Summary")
+print(asp_summary)
+
+print()
+print("Revenue Summary")
+print(revenue_summary)

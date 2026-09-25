@@ -5,36 +5,210 @@ on:
 
 jobs:
   build-windows:
+    name: Build Data Validation Hub
     runs-on: windows-latest
 
     steps:
+
+      # ============================================================
+      # 1. Checkout repository
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. Setup Python
+      # ============================================================
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      # ============================================================
+      # 3. Verify project structure
+      # ============================================================
+      - name: Verify project structure
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host "PROJECT ROOT"
+          Write-Host "======================================"
+
+          Get-ChildItem -Force
+
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "Python files"
+          Write-Host "======================================"
+
+          Get-ChildItem -Path . -Filter "*.py" -Recurse
+
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "Spec file"
+          Write-Host "======================================"
+
+          if (Test-Path "DataValidationHub.spec") {
+              Write-Host "DataValidationHub.spec FOUND"
+          }
+          else {
+              Write-Error "DataValidationHub.spec NOT FOUND"
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "Main file"
+          Write-Host "======================================"
+
+          if (Test-Path "main.py") {
+              Write-Host "main.py FOUND"
+          }
+          else {
+              Write-Error "main.py NOT FOUND"
+              exit 1
+          }
+
+      # ============================================================
+      # 4. Upgrade pip
+      # ============================================================
+      - name: Upgrade pip
         run: |
           python -m pip install --upgrade pip
+
+      # ============================================================
+      # 5. Install project dependencies
+      # ============================================================
+      - name: Install dependencies
+        run: |
           pip install -r requirements.txt
+
+      # ============================================================
+      # 6. Install PyInstaller
+      # ============================================================
+      - name: Install PyInstaller
+        run: |
           pip install pyinstaller
 
+      # ============================================================
+      # 7. Verify installed packages
+      # ============================================================
+      - name: Verify Python environment
+        run: |
+          python --version
+          pip --version
+          pyinstaller --version
+
+      # ============================================================
+      # 8. Build Windows application
+      # ============================================================
       - name: Build application
         run: |
           pyinstaller DataValidationHub.spec --clean --noconfirm
 
-      - name: Create ZIP
+      # ============================================================
+      # 9. Verify PyInstaller output
+      # ============================================================
+      - name: Verify Windows build
         shell: pwsh
         run: |
-          Compress-Archive `
-            -Path "dist/DataValidationHub/*" `
-            -DestinationPath "DataValidationHub-Windows.zip"
+          Write-Host "======================================"
+          Write-Host "DIST CONTENTS"
+          Write-Host "======================================"
 
+          if (Test-Path "dist") {
+              Get-ChildItem -Path "dist" -Recurse
+          }
+          else {
+              Write-Error "dist folder was not created."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "Checking executable"
+          Write-Host "======================================"
+
+          if (Test-Path "dist/DataValidationHub.exe") {
+              Write-Host "DataValidationHub.exe FOUND"
+          }
+          elseif (Test-Path "dist/DataValidationHub/DataValidationHub.exe") {
+              Write-Host "DataValidationHub.exe FOUND inside folder"
+          }
+          else {
+              Write-Error "DataValidationHub.exe NOT FOUND"
+              exit 1
+          }
+
+      # ============================================================
+      # 10. Create Windows ZIP
+      # ============================================================
+      - name: Create Windows ZIP
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host "CREATING WINDOWS ZIP"
+          Write-Host "======================================"
+
+          if (Test-Path "dist/DataValidationHub") {
+
+              Write-Host "Packaging folder-based build..."
+
+              Compress-Archive `
+                -Path "dist/DataValidationHub/*" `
+                -DestinationPath "DataValidationHub-Windows.zip" `
+                -Force
+          }
+
+          elseif (Test-Path "dist/DataValidationHub.exe") {
+
+              Write-Host "Packaging single EXE..."
+
+              Compress-Archive `
+                -Path "dist/DataValidationHub.exe" `
+                -DestinationPath "DataValidationHub-Windows.zip" `
+                -Force
+          }
+
+          else {
+
+              Write-Host "DIST CONTENTS:"
+              Get-ChildItem -Path "dist" -Recurse
+
+              Write-Error "No DataValidationHub executable found."
+              exit 1
+          }
+
+          Write-Host ""
+          Write-Host "ZIP CREATED:"
+          Get-Item "DataValidationHub-Windows.zip"
+
+      # ============================================================
+      # 11. Upload Windows artifact
+      # ============================================================
       - name: Upload Windows application
         uses: actions/upload-artifact@v4
         with:
           name: DataValidationHub-Windows
           path: DataValidationHub-Windows.zip
+          if-no-files-found: error
+
+      # ============================================================
+      # 12. Build summary
+      # ============================================================
+      - name: Build summary
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host "BUILD SUCCESSFUL"
+          Write-Host "======================================"
+          Write-Host ""
+          Write-Host "Application:"
+          Write-Host "DataValidationHub.exe"
+          Write-Host ""
+          Write-Host "Artifact:"
+          Write-Host "DataValidationHub-Windows.zip"
+          Write-Host ""
+          Write-Host "Download it from:"
+          Write-Host "GitHub Actions -> Workflow Run -> Artifacts"
